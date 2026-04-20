@@ -1,4 +1,0 @@
-Model	Overall	Easy	Hard	Short	Medium	Long
-Qwen3-30B-A3B-local_opt_0.6B	26.6	31.2	23.8	32.2	19.5	31.5
-Qwen3-30B-A3B-local_opt_1.7B	31.4	33.9	29.9	37.2	27.0	30.6
-Qwen3-30B-A3B-local_opt_org	30.4	31.2	29.9	37.8	25.6	27.8

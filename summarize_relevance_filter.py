@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 
+"""相关性过滤式摘要脚本。
+
+这个方法不强调覆盖全文，而是直接让模型删除与题目无关的信息，只保留能支持/排除候选说法的证据。
+它适合上下文虽然长，但真正用于解题的信息分布比较集中的场景。
+"""
+
 from summarize_common import build_parser, call_chat_completion, clip_text_by_chars, run_pipeline
 
 
@@ -41,6 +47,7 @@ USER_TEMPLATE = """【问题】
 
 
 def summarize_one_item(item, args):
+    # 直接对整篇原文做“相关证据过滤”，不走分块，也不追求保留全局背景。
     user_prompt = USER_TEMPLATE.format(
         question=item.get("question", ""),
         choice_A=item.get("choice_A", ""),
@@ -68,6 +75,7 @@ def summarize_one_item(item, args):
 
 
 def main():
+    # 主要控制量是最终摘要字符上限和允许模型生成的最大 token 数。
     parser = build_parser("Keep only evidence directly relevant to the question and candidate statements.")
     parser.add_argument("--summary_char_limit", type=int, default=2500)
     parser.add_argument("--max_summary_tokens", type=int, default=1000)

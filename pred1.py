@@ -9,6 +9,17 @@ from transformers import AutoTokenizer
 import tiktoken
 import torch.multiprocessing as mp
 
+"""摘要输入版评测脚本。
+
+这个版本不再读取官方原始数据集，而是直接读取本地 input_jsonl 作为评测输入。
+因此它主要用于“先做摘要，再把摘要结果送入大模型答题”的场景。
+
+它和 pred.py 的最大差异是：
+1. 输入必须来自本地 jsonl。
+2. 会跳过带 _summarize_error 的样本。
+3. 输出文件名会带输入摘要文件名，便于区分不同摘要版本。
+"""
+
 model_map = json.loads(open('config/model2path.json', encoding='utf-8').read())
 maxlen_map = json.loads(open('config/model2maxlen.json', encoding='utf-8').read())
 
@@ -63,6 +74,7 @@ def decode_prompt(token_ids, model, tokenizer):
 
 
 def truncate_prompt(prompt, model, tokenizer, max_len=None):
+    # 摘要输入通常更短，但仍然保留同样的首尾截断逻辑来兜底。
     if max_len is None:
         max_len = maxlen_map[model]
     input_ids = encode_prompt(prompt, model, tokenizer)
@@ -121,11 +133,13 @@ def extract_answer(response):
 
 
 def load_input_items(input_jsonl):
+    # 这里的输入通常就是 summarize*.py 脚本生成的摘要结果文件。
     with open(input_jsonl, encoding='utf-8') as f:
         return [json.loads(line) for line in f if line.strip()]
 
 
 def build_output_path(args):
+    # 把摘要输入文件名拼进输出结果名，便于区分 0.6B / 1.7B / 其他摘要来源。
     input_stem = os.path.splitext(os.path.basename(args.input_jsonl))[0]
     model_stem = args.model.split("/")[-1]
     if args.rag > 0:
@@ -152,6 +166,7 @@ def get_pred(data, args, out_file, write_lock):
     )
     for item in tqdm(data):
         if item.get("_summarize_error"):
+            # 摘要阶段失败的样本不继续答题，避免把坏样本带入评测结果。
             continue
         context = item['context']
         if args.rag > 0:
@@ -174,6 +189,7 @@ def get_pred(data, args, out_file, write_lock):
         if output == '':
             continue
         if args.cot:
+            # CoT 模式仍然采用“两阶段”：先生成推理，再抽取最终选项。
             response = output.strip()
             item['response_cot'] = response
             prompt = template_0shot_cot_ans.replace('$DOC$', context.strip()).replace('$Q$', item['question'].strip()).replace('$C_A$', item['choice_A'].strip()).replace('$C_B$', item['choice_B'].strip()).replace('$C_C$', item['choice_C'].strip()).replace('$C_D$', item['choice_D'].strip()).replace('$COT$', response)

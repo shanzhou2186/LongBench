@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""直接摘要版脚本。
+
+这是最直接的一种方法：把整篇原文连同问题和选项一起送给小模型，让它一次性生成高密度摘要。
+它不做分块、不做层次合并，流程最简单，通常可作为其他更复杂方法的对照基线。
+"""
+
 import os
 import json
 import time
@@ -59,6 +65,7 @@ def normalize_base_url(base_url: str) -> str:
 
 
 def ensure_server_ready(base_url: str, timeout: int = 5) -> None:
+    # 运行前先确认本地 OpenAI-compatible 服务已经启动。
     models_url = normalize_base_url(base_url) + "/models"
     try:
         with urllib.request.urlopen(models_url, timeout=timeout) as response:
@@ -87,6 +94,7 @@ def strip_think_blocks(text: str) -> str:
 
 
 def sanitize_summary(text: str) -> str:
+    # 清理思维链和直接答案表达，避免摘要中泄露选项结论。
     text = strip_think_blocks(text)
     forbidden_line_patterns = [
         r'正确答案',
@@ -122,6 +130,7 @@ def sanitize_summary(text: str) -> str:
 
 
 def clip_summary(text: str, summary_char_limit: int) -> str:
+    # 直接摘要版只做字符级裁剪，尽量把输出限制在设定长度附近。
     text = sanitize_summary(text)
     if len(text) <= summary_char_limit:
         return text
@@ -143,10 +152,7 @@ def call_chat_completion(
     timeout_s: int = 600,
     disable_thinking: bool = True,
 ) -> str:
-    """
-    Call SGLang local service (usually OpenAI-compatible).
-    Default path: /v1/chat/completions
-    """
+    # 调用本地 SGLang/OpenAI-compatible 接口获取单次摘要结果。
     base_url = normalize_base_url(base_url)
     if chat_path.startswith("/v1/"):
         chat_path = chat_path[3:]
@@ -192,6 +198,7 @@ def summarize_one_item(
     summary_char_limit: int,
     disable_thinking: bool,
 ) -> str:
+    # 直接把整篇上下文和题目一起送入模型，让模型一次性输出高密度摘要。
     user_prompt = SUMMARIZER_USER_TMPL.format(
         question=item.get("question", ""),
         choice_A=item.get("choice_A", ""),
@@ -220,6 +227,7 @@ def summarize_one_item(
 
 
 def load_input_items(args) -> List[Dict[str, Any]]:
+    # 支持从本地 jsonl 读取，也支持直接从 Hugging Face 数据集读取。
     if args.input_jsonl:
         items = []
         with open(args.input_jsonl, "r", encoding="utf-8") as f:
@@ -237,6 +245,7 @@ def load_input_items(args) -> List[Dict[str, Any]]:
 
 
 def main():
+    # 这个脚本没有复杂流程，主要参数就是输入来源、输出文件和摘要长度控制。
     ap = argparse.ArgumentParser()
     ap.add_argument("--hf_dataset", type=str, default="THUDM/LongBench-v2")
     ap.add_argument("--hf_split", type=str, default="train")

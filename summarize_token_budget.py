@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 
+"""按 token 预算约束的摘要脚本。
+
+这个脚本的目标不是“尽量短”，而是“尽量不超过指定 token 上限”。
+因此它更像一个预算控制器：先让模型压缩，再用目标 tokenizer 做硬裁剪，确保摘要落在给定预算内。
+"""
+
 import json
 
 from summarize_common import build_parser, call_chat_completion, clip_text_by_tokens, get_tokenizer, run_pipeline
@@ -40,6 +46,7 @@ TOKENIZER = None
 
 
 def summarize_one_item(item, args):
+    # 提示词里直接告诉模型目标 token 预算，再在返回后用 tokenizer 做最终硬裁剪。
     user_prompt = USER_TEMPLATE.format(
         question=item.get("question", ""),
         choice_A=item.get("choice_A", ""),
@@ -68,6 +75,7 @@ def summarize_one_item(item, args):
 
 def main():
     global TOKENIZER
+    # 先解析出要用哪个 tokenizer 统计预算；如果传了 model_path 就优先用显式路径。
     parser = build_parser("Constrain summary output by token budget, such as 8k, 16k, or 32k tokens.")
     parser.add_argument("--target_tokens", type=int, default=8192)
     parser.add_argument("--max_summary_tokens", type=int, default=12000)

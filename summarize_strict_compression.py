@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
 
+"""严格压缩版摘要脚本。
+
+这个脚本的目标不是生成一份通用、可读性优先的摘要，而是用小模型把长上下文压缩成
+“仍然足够支持后续答题模型推理”的证据摘要。
+
+核心思路有两条路径：
+1. 文本较短时，直接单次压缩。
+2. 文本较长时，先分块抽取证据，再分层合并，最后按下游答题模型的 token 预算裁剪。
+
+因此，这个脚本的压缩目标是“适配下游答题 prompt 的真实预算”，而不是只看固定字符数。
+"""
+
 import json
 import os
 
@@ -151,6 +163,7 @@ def prepare_target_prompt(prompt, model_name, enable_thinking=False):
 
 
 def build_target_prompt(item, context, args):
+    # 用下游答题模型的真实模板来估算 prompt 开销，避免摘要长度和实际答题输入预算脱节。
     prompt = (
         TARGET_TEMPLATE
         .replace('$DOC$', (context or '').strip())
@@ -171,6 +184,7 @@ def get_effective_summary_token_limit(item, args):
     max_prompt_tokens = resolve_target_max_prompt_tokens(args)
     if max_prompt_tokens <= 0:
         return 0
+    # 先扣掉题目、选项、模板本身占用的 token，再把剩余预算留给摘要正文。
     prompt_overhead = len(TARGET_TOKENIZER.encode(build_target_prompt(item, '', args), add_special_tokens=False))
     return max(0, max_prompt_tokens - prompt_overhead)
 
@@ -185,6 +199,7 @@ def get_effective_generation_tokens(item, args):
 
 
 def finalize_summary(text, item, args):
+    # 生成结束后再按下游 tokenizer 做一次硬裁剪，确保最终摘要真的能塞进目标 prompt 预算。
     result = text
     token_limit = get_effective_summary_token_limit(item, args)
     if token_limit > 0 and TARGET_TOKENIZER is not None:
@@ -197,6 +212,7 @@ def finalize_summary(text, item, args):
 
 
 def merge_evidence_batch(evidence_parts, item, args, final_merge=False):
+    # 长文不是一次性全部合并，而是先按批次压缩，避免 merge 阶段本身再次超长。
     template = MERGE_USER_TEMPLATE if final_merge else INTERMEDIATE_MERGE_USER_TEMPLATE
     merge_prompt = template.format(
         question=item.get("question", ""),
@@ -226,6 +242,7 @@ def merge_evidence_batch(evidence_parts, item, args, final_merge=False):
 def hierarchical_merge_evidence(evidence_parts, item, args):
     if not evidence_parts:
         return ""
+    # 分层合并：把 chunk 级证据逐层压缩，直到只剩一份最终摘要。
     current_level = list(evidence_parts)
     level = 0
     while len(current_level) > 1:
@@ -247,6 +264,7 @@ def hierarchical_merge_evidence(evidence_parts, item, args):
 
 
 def summarize_single_pass(item, args):
+    # 如果原文还不算太长，直接单次压缩，减少分块带来的信息割裂。
     user_prompt = USER_TEMPLATE.format(
         question=item.get("question", ""),
         choice_A=item.get("choice_A", ""),
@@ -274,6 +292,7 @@ def summarize_single_pass(item, args):
 
 
 def summarize_chunked(item, args):
+    # 对超长文本，先做“分块证据抽取”，再做“证据合并”，这是脚本处理长上下文的主路径。
     chunks = chunk_text(item.get("context", ""), args.chunk_chars, args.overlap_chars)
     print(f"[CHUNK] id={item.get('_id', '')} total_chunks={len(chunks)}")
     evidence_parts = []
@@ -308,6 +327,7 @@ def summarize_chunked(item, args):
 
 def summarize_one_item(item, args):
     context = item.get("context", "") or ""
+    # 这里按原始上下文长度切换策略：短文走单次压缩，长文走分块抽取+层次合并。
     if len(context) <= args.auto_chunk_chars:
         return summarize_single_pass(item, args)
     return summarize_chunked(item, args)
@@ -315,6 +335,8 @@ def summarize_one_item(item, args):
 
 def main():
     global MODEL_MAP, MAXLEN_MAP, TARGET_TOKENIZER, TARGET_TEMPLATE
+    # model 是负责生成摘要的小模型；target_model 是后续真正拿摘要去答题的大模型。
+    # 这个脚本会按 target_model 的 tokenizer 和 prompt 模板来控制最终摘要预算。
     parser = build_parser("Strongly compress context while preserving only question-relevant evidence.")
     parser.add_argument("--auto_chunk_chars", type=int, default=12000)
     parser.add_argument("--chunk_chars", type=int, default=12000)

@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
 
+"""摘要脚本公共工具模块。
+
+这个文件不直接定义某一种摘要策略，而是为各个 summarize*.py 提供公共能力：
+1. 连接本地 OpenAI-compatible / SGLang 服务。
+2. 加载输入数据集或本地 jsonl。
+3. 做文本清洗、按字符/按 token 裁剪。
+4. 承担统一的逐样本运行与错误落盘逻辑。
+
+各个具体摘要脚本只需要定义 summarize_one_item，即可复用这里的通用流程。
+"""
+
 import argparse
 import json
 import os
@@ -37,6 +48,7 @@ def normalize_base_url(base_url: str) -> str:
 
 
 def ensure_server_ready(base_url: str, timeout: int = 5) -> None:
+    # 在正式跑批前先探活，避免模型服务地址填错后跑到一半才失败。
     models_url = normalize_base_url(base_url) + "/models"
     try:
         with urllib.request.urlopen(models_url, timeout=timeout) as response:
@@ -65,6 +77,7 @@ def strip_think_blocks(text: str) -> str:
 
 
 def sanitize_summary(text: str) -> str:
+    # 去掉思维链和明显违反要求的答案表达，保证下游得到的是“摘要”而不是“直接答案”。
     text = strip_think_blocks(text)
     forbidden_line_patterns = [
         r'正确答案',
@@ -100,6 +113,7 @@ def sanitize_summary(text: str) -> str:
 
 
 def clip_text_by_chars(text: str, char_limit: int) -> str:
+    # 按字符做软裁剪，尽量在句号/分段处截断，减少硬截断带来的可读性损失。
     text = sanitize_summary(text)
     if char_limit <= 0 or len(text) <= char_limit:
         return text
@@ -123,6 +137,7 @@ def count_tokens(tokenizer, text: str) -> int:
 
 
 def clip_text_by_tokens(text: str, tokenizer, token_limit: int) -> str:
+    # 按 token 做硬裁剪，通常用于适配下游模型的真实上下文预算。
     text = sanitize_summary(text)
     if token_limit <= 0:
         return text
@@ -134,6 +149,7 @@ def clip_text_by_tokens(text: str, tokenizer, token_limit: int) -> str:
 
 
 def chunk_text(text: str, chunk_chars: int, overlap_chars: int) -> List[str]:
+    # 用字符级切块把超长文本拆成重叠片段，给“先抽证据再合并”的方法复用。
     text = text or ""
     if chunk_chars <= 0 or len(text) <= chunk_chars:
         return [text]
@@ -161,6 +177,7 @@ def call_chat_completion(
     timeout_s: int = 600,
     disable_thinking: bool = True,
 ) -> str:
+    # 统一封装对本地 OpenAI-compatible 接口的调用，屏蔽各脚本重复样板代码。
     base_url = normalize_base_url(base_url)
     if chat_path.startswith("/v1/"):
         chat_path = chat_path[3:]
@@ -195,6 +212,7 @@ def call_chat_completion(
 
 
 def load_input_items(args) -> List[Dict[str, Any]]:
+    # 支持两种输入来源：本地 jsonl 或 Hugging Face 数据集。
     if args.input_jsonl:
         items = []
         with open(args.input_jsonl, "r", encoding="utf-8") as file:
@@ -212,6 +230,7 @@ def load_input_items(args) -> List[Dict[str, Any]]:
 
 
 def build_parser(description: str) -> argparse.ArgumentParser:
+    # 为所有摘要脚本提供统一参数骨架，策略特有参数再由各脚本自行追加。
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--hf_dataset", type=str, default="THUDM/LongBench-v2")
     parser.add_argument("--hf_split", type=str, default="train")
@@ -229,6 +248,7 @@ def build_parser(description: str) -> argparse.ArgumentParser:
 
 
 def run_pipeline(args, summarize_fn) -> None:
+    # 统一的批处理入口：逐样本调用策略函数，把成功结果和失败结果分别落盘。
     ensure_server_ready(args.base_url)
     items = load_input_items(args)
     if args.limit and args.limit > 0:

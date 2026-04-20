@@ -10,6 +10,12 @@ from transformers import AutoTokenizer
 import tiktoken
 import torch.multiprocessing as mp
 
+"""增强版评测脚本。
+
+这个脚本把 pred.py 和 pred1.py 的能力合并到一起：既能读取官方原始数据集，也能读取本地
+摘要 jsonl。同时它在输出约束和上下文溢出处理上更稳，适合作为默认评测入口。
+"""
+
 model_map = json.loads(open('config/model2path.json', encoding='utf-8').read())
 maxlen_map = json.loads(open('config/model2maxlen.json', encoding='utf-8').read())
 
@@ -44,6 +50,7 @@ def prepare_prompt(prompt, model):
 
 
 def build_prompt(template, item, context, strict_answer=False, cot_response=None):
+    # 非 CoT 场景可追加严格答案约束，要求模型只输出单个选项字母。
     prompt = template.replace('$DOC$', context.strip()).replace('$Q$', item['question'].strip()).replace('$C_A$', item['choice_A'].strip()).replace('$C_B$', item['choice_B'].strip()).replace('$C_C$', item['choice_C'].strip()).replace('$C_D$', item['choice_D'].strip())
     if cot_response is not None:
         prompt = prompt.replace('$COT$', cot_response)
@@ -78,6 +85,7 @@ def decode_prompt(token_ids, model, tokenizer):
 
 
 def truncate_prompt(prompt, model, tokenizer, max_len=None):
+    # 仍然使用首尾保留截断，但会配合 prompt margin 和 overflow backoff 一起工作。
     if max_len is None:
         max_len = maxlen_map[model]
     input_ids = encode_prompt(prompt, model, tokenizer)
@@ -96,6 +104,7 @@ def is_context_length_error(message):
 
 
 def query_llm(prompt, model, tokenizer, client=None, temperature=0.0, max_new_tokens=256, max_prompt_tokens=None):
+    # 这个版本比基础版更稳：如果服务端提示 context overflow，会自动缩短 prompt 或输出长度重试。
     current_prompt_limit = max_prompt_tokens
     current_max_new_tokens = max_new_tokens
     tries = 0
@@ -117,6 +126,7 @@ def query_llm(prompt, model, tokenizer, client=None, temperature=0.0, max_new_to
         except Exception as exc:
             error_text = str(exc)
             if is_context_length_error(error_text):
+                # 优先缩减 prompt 预算；如果还不够，再缩减生成长度，尽量让请求成功返回。
                 if current_prompt_limit is not None and current_prompt_limit > CONTEXT_OVERFLOW_BACKOFF_TOKENS:
                     current_prompt_limit = max(1, current_prompt_limit - CONTEXT_OVERFLOW_BACKOFF_TOKENS)
                 elif current_max_new_tokens > 32:
@@ -156,6 +166,7 @@ def extract_answer(response):
 
 
 def build_output_path(args):
+    # opt 版本统一加 _opt 后缀，和旧版评测结果区分开。
     model_stem = args.model.split('/')[-1]
     suffix = '_opt'
     if args.rag > 0:
@@ -170,6 +181,7 @@ def build_output_path(args):
 def get_pred(data, args, out_file, write_lock):
     model = args.model
     model_context_limit = min(maxlen_map[model], args.max_prompt_tokens)
+    # 预留一部分 prompt 余量，避免把输入撑满后不给模型留输出空间。
     max_prompt_tokens = max(1, model_context_limit - args.prompt_token_margin)
     if 'gpt' in model or 'o1' in model:
         tokenizer = tiktoken.encoding_for_model('gpt-4o-2024-08-06')
@@ -195,6 +207,7 @@ def get_pred(data, args, out_file, write_lock):
         else:
             template = template_0shot
 
+        # 非 CoT 默认使用严格答案输出约束，减少答案提取失败。
         prompt = build_prompt(template, item, context, strict_answer=not args.cot)
         prompt = prepare_prompt(prompt, model)
 
@@ -206,6 +219,7 @@ def get_pred(data, args, out_file, write_lock):
             continue
 
         if args.cot:
+            # CoT 依旧是两阶段：先生成推理，再拼回短 prompt 提取最终答案。
             response = output.strip()
             item['response_cot'] = response
             prompt = build_prompt(template_0shot_cot_ans, item, context, strict_answer=True, cot_response=response)
@@ -225,6 +239,7 @@ def get_pred(data, args, out_file, write_lock):
 
 
 def load_data(args):
+    # 同时支持两种输入来源：本地摘要 jsonl，或官方原始 LongBench-v2 数据集。
     if args.input_jsonl:
         data_all = []
         with open(args.input_jsonl, 'r', encoding='utf-8') as f:

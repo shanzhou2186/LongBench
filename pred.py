@@ -10,6 +10,15 @@ from transformers import AutoTokenizer
 import tiktoken
 import torch.multiprocessing as mp
 
+"""基础版评测脚本。
+
+这个脚本直接从 LongBench-v2 原始数据集读取样本，然后把原始 context、RAG context
+或 no-context 变体拼进答题 prompt，调用大模型做多选题预测。
+
+它的定位是最原始的 baseline：输入来源固定是官方数据集，逻辑相对直接，主要用于和后续
+摘要版/增强版脚本做对比。
+"""
+
 model_map = json.loads(open('config/model2path.json', encoding='utf-8').read())
 maxlen_map = json.loads(open('config/model2maxlen.json', encoding='utf-8').read())
 
@@ -60,6 +69,7 @@ def decode_prompt(token_ids, model, tokenizer):
     return tokenizer.decode(token_ids)
 
 def truncate_prompt(prompt, model, tokenizer, max_len=None):
+    # 超长时采用“保留开头 + 保留结尾”的截断方式，中间内容被丢弃。
     if max_len is None:
         max_len = maxlen_map[model]
     input_ids = encode_prompt(prompt, model, tokenizer)
@@ -72,6 +82,7 @@ def truncate_prompt(prompt, model, tokenizer, max_len=None):
     return decode_prompt(truncated_ids, model, tokenizer)
 
 def query_llm(prompt, model, tokenizer, client=None, temperature=0.5, max_new_tokens=128, stop=None, max_prompt_tokens=None):
+    # 在真正请求前先做 prompt 截断，尽量避免服务端直接报上下文超长。
     prompt = truncate_prompt(prompt, model, tokenizer, max_len=max_prompt_tokens)
     tries = 0
     if model in model_map:
@@ -129,6 +140,7 @@ def get_pred(data, args, out_file, write_lock):
     )
     for item in tqdm(data):
         context = item['context']
+        # 根据参数决定当前样本用哪种输入形式：RAG、无上下文、CoT 或普通 0-shot。
         if args.rag > 0:
             template = template_rag
             retrieved = item["retrieved_context"][:args.rag]
@@ -149,6 +161,7 @@ def get_pred(data, args, out_file, write_lock):
         if output == '':
             continue
         if args.cot: # extract answer
+            # CoT 模式先拿推理过程，再用第二轮短 prompt 抽取最终选项。
             response = output.strip()
             item['response_cot'] = response
             prompt = template_0shot_cot_ans.replace('$DOC$', context.strip()).replace('$Q$', item['question'].strip()).replace('$C_A$', item['choice_A'].strip()).replace('$C_B$', item['choice_B'].strip()).replace('$C_C$', item['choice_C'].strip()).replace('$C_D$', item['choice_D'].strip()).replace('$COT$', response)
@@ -178,6 +191,7 @@ def main():
     else:
         out_file = os.path.join(args.save_dir, args.model.split("/")[-1] + ".jsonl")
 
+    # 基础版固定读取官方 LongBench-v2 数据集，不直接消费本地摘要 jsonl。
     dataset = load_dataset('THUDM/LongBench-v2', split='train') # dataset = json.load(open('data.json', 'r', encoding='utf-8'))
     data_all = [{"_id": item["_id"], "domain": item["domain"], "sub_domain": item["sub_domain"], "difficulty": item["difficulty"], "length": item["length"], "question": item["question"], "choice_A": item["choice_A"], "choice_B": item["choice_B"], "choice_C": item["choice_C"], "choice_D": item["choice_D"], "answer": item["answer"], "context": item["context"]} for item in dataset]
 
